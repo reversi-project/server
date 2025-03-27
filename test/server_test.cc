@@ -1,109 +1,127 @@
 #include <gtest/gtest.h>
 
-#include "game.h"
+#include <cstdint>
+
+#include "game_session.h"
 #include "server.h"
 
-using reversi::server::Pos;
 using reversi::server::Server;
-using reversi::server::TurnResult;
+using reversi::server::WebSocket;
+using namespace std::literals;
 
-TEST(ServerSuite, CreateGame) {
-  auto server = Server();
+namespace {
 
-  auto credentials = server.CreateGame();
+using Responses = std::vector<std::pair<uint64_t, std::string>>;
 
-  ASSERT_EQ(0, credentials.game_id);
+class ServerWrapper {
+ public:
+  void MakeRequest(uint64_t ws, const std::string& req) {
+    server_.HandleRequest(req, reinterpret_cast<WebSocket*>(ws),  // NOLINT
+                          [this](WebSocket* ws, const std::string& message) {
+                            responses_.emplace_back(
+                                reinterpret_cast<uint64_t>(ws),  // NOLINT
+                                message);
+                          });
+  }
+
+  const Responses& GetResponses() const { return responses_; }
+
+ private:
+  Server server_;
+  Responses responses_;
+};
+
+}  // namespace
+
+TEST(ServerSuite, UnknownCommand) {
+  auto server = ServerWrapper{};
+
+  server.MakeRequest(0, "unknown");
+
+  Responses expected = {{0, "error"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, ConnectToAvailableGame) {
-  auto server = Server();
-  auto credentials = server.CreateGame();
+TEST(ServerSuite, CorrectCreate) {
+  auto server = ServerWrapper{};
 
-  auto result = server.TryConnectToGame(credentials.game_id);
+  server.MakeRequest(0, "create");
 
-  ASSERT_TRUE(result.has_value());
-  ASSERT_EQ(credentials.game_id, (*result).game_id);
+  Responses expected = {{0, "0"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, ConnectToNonExistingGame) {
-  auto server = Server();
+TEST(ServerSuite, CorrectDoubleCreate) {
+  auto server = ServerWrapper{};
 
-  auto result = server.TryConnectToGame(0);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(0, "create");
 
-  ASSERT_FALSE(result.has_value());
+  Responses expected = {{0, "0"}, {0, "1"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, ConnectToFullGame) {
-  auto server = Server();
-  auto credentials = server.CreateGame();
+TEST(ServerSuite, CorrectConnect) {
+  auto server = ServerWrapper{};
 
-  server.TryConnectToGame(credentials.game_id);
-  auto result = server.TryConnectToGame(credentials.game_id);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 0");
 
-  ASSERT_FALSE(result.has_value());
+  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, MakeValidTurn) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto second_player = server.TryConnectToGame(first_player.game_id);
-  auto pos = Pos(4, 2);
+TEST(ServerSuite, IncorrectConnect) {
+  auto server = ServerWrapper{};
 
-  auto result = server.MakeTurn(first_player.game_id, first_player.key, pos);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 222");
 
-  ASSERT_EQ(TurnResult::kSuccess, result);
+  Responses expected = {{0, "0"}, {1, "error"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, MakeInvalidTurn) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto second_player = server.TryConnectToGame(first_player.game_id);
-  auto pos = Pos(0, 0);
+TEST(ServerSuite, InccorectOrderOfTurns) {
+  auto server = ServerWrapper{};
 
-  auto result = server.MakeTurn(first_player.game_id, first_player.key, pos);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 0");
+  server.MakeRequest(1, "turn 0 4 2");
 
-  ASSERT_EQ(TurnResult::kFailure, result);
+  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {1, "fail"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, MakeTurnInUnknownGame) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto second_player = server.TryConnectToGame(first_player.game_id);
-  auto pos = Pos(4, 2);
+TEST(ServerSuite, IncorrectTurn) {
+  auto server = ServerWrapper{};
 
-  auto result = server.MakeTurn(2, first_player.key, pos);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 0");
+  server.MakeRequest(0, "turn");
 
-  ASSERT_EQ(TurnResult::kFailure, result);
+  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {0, "error"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, MakeTurnWithInvalidKey) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto second_player = server.TryConnectToGame(first_player.game_id);
-  auto pos = Pos(4, 2);
+TEST(ServerSuite, IncorrectTurnWithoutGameId) {
+  auto server = ServerWrapper{};
 
-  auto result = server.MakeTurn(first_player.game_id, "invalid_key", pos);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 0");
+  server.MakeRequest(0, "turn 4 2");
 
-  ASSERT_EQ(TurnResult::kFailure, result);
+  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {0, "error"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
 
-TEST(ServerSuite, MakeTurnInInvalidOrder) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto second_player = server.TryConnectToGame(first_player.game_id).value();
-  auto pos = Pos(4, 2);
+TEST(ServerSuite, CorrectTurn) {
+  auto server = ServerWrapper{};
 
-  auto result = server.MakeTurn(second_player.game_id, second_player.key, pos);
+  server.MakeRequest(0, "create");
+  server.MakeRequest(1, "connect 0");
+  server.MakeRequest(0, "turn 0 4 2");
 
-  ASSERT_EQ(TurnResult::kFailure, result);
-}
-
-TEST(ServerSuite, MakeTurnInNotStartedGame) {
-  auto server = Server();
-  auto first_player = server.CreateGame();
-  auto pos = Pos(4, 2);
-
-  auto result = server.MakeTurn(first_player.game_id, first_player.key, pos);
-
-  ASSERT_EQ(TurnResult::kFailure, result);
+  Responses expected = {
+      {0, "0"}, {1, "connected"}, {0, "start"}, {0, "ok"}, {1, "turn 4 2"}};
+  ASSERT_EQ(expected, server.GetResponses());
 }
