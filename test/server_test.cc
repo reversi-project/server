@@ -1,127 +1,171 @@
 #include <gtest/gtest.h>
 
-#include <cstdint>
+#include <boost/asio.hpp>
+#include <boost/asio/ip/address.hpp>
+#include <boost/beast.hpp>
 
-#include "game_session.h"
-#include "server.h"
+#include "reversi/server/app.h"
 
-using reversi::server::Server;
+using namespace std::string_literals;
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace ws = beast::websocket;
+namespace ip = asio::ip;
+
+using reversi::server::Endpoint;
+using reversi::server::FlatBuffer;
+using reversi::server::IoContext;
+using reversi::server::PortT;
+using reversi::server::RunApp;
 using reversi::server::WebSocket;
-using namespace std::literals;
 
-namespace {
+using Resolver = ip::tcp::resolver;
+static constexpr std::string kHost = "127.0.0.1";
+static constexpr PortT kPort = 8080;
+static constexpr auto kCreatedLength = 8;
 
-using Responses = std::vector<std::pair<uint64_t, std::string>>;
-
-class ServerWrapper {
+class Client {
  public:
-  void MakeRequest(uint64_t ws, const std::string& req) {
-    server_.HandleRequest(req, reinterpret_cast<WebSocket*>(ws),  // NOLINT
-                          [this](WebSocket* ws, const std::string& message) {
-                            responses_.emplace_back(
-                                reinterpret_cast<uint64_t>(ws),  // NOLINT
-                                message);
-                          });
+  explicit Client() : context_{IoContext{}}, ws_{context_} {
+    ws_.set_option(
+        ws::stream_base::timeout::suggested(beast::role_type::client));
+    auto addr = ip::make_address(kHost);
+    auto endpoint = Endpoint{addr, kPort};
+
+    beast::get_lowest_layer(ws_).socket().connect(endpoint);
+    ws_.handshake(fmt::format("{}:{}", kHost, kPort), "/");
   }
 
-  const Responses& GetResponses() const { return responses_; }
+  std::string Read() {
+    FlatBuffer buffer;
+    ws_.read(buffer);
+    return beast::buffers_to_string(buffer.data());
+  }
+
+  void Write(const std::string& message) { ws_.write(asio::buffer(message)); }
 
  private:
-  Server server_;
-  Responses responses_;
+  IoContext context_;
+  WebSocket ws_;
 };
 
-}  // namespace
+class ServerSuite : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    server_thread_ = std::thread([] { RunApp(kPort, 1); });
+    constexpr auto kTimeout = 1000;
+    std::this_thread::sleep_for(std::chrono::milliseconds(kTimeout));
+  }
 
-TEST(ServerSuite, UnknownCommand) {
-  auto server = ServerWrapper{};
+  void TearDown() override { server_thread_.detach(); }
 
-  server.MakeRequest(0, "unknown");
+ private:
+  std::thread server_thread_;
+};
 
-  Responses expected = {{0, "error"}};
-  ASSERT_EQ(expected, server.GetResponses());
+TEST_F(ServerSuite, CreateGame) {
+  auto client = Client{};
+
+  client.Write("create");
+
+  ASSERT_TRUE(client.Read().starts_with("created"));
 }
 
-TEST(ServerSuite, CorrectCreate) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, ValidConnectGame) {
+  auto client1 = Client{};
+  auto client2 = Client{};
 
-  server.MakeRequest(0, "create");
+  client1.Write("create");
+  auto game_id = client1.Read().substr(kCreatedLength);
 
-  Responses expected = {{0, "0"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  client2.Write(fmt::format("connect {}", game_id));
+
+  ASSERT_EQ(client2.Read(), "connected");
+  ASSERT_EQ(client1.Read(), "start");
 }
 
-TEST(ServerSuite, CorrectDoubleCreate) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, InvalidConnectGame) {
+  auto client = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(0, "create");
+  client.Write("connect");
 
-  Responses expected = {{0, "0"}, {0, "1"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  ASSERT_EQ(client.Read(), "error ConnectRequest: expect 1 args but got 0"s);
 }
 
-TEST(ServerSuite, CorrectConnect) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, InvalidRequest) {
+  auto client = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 0");
+  client.Write("connect not_int");
 
-  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  ASSERT_EQ(client.Read(), "error ConnectRequest: unable to parse int"s);
 }
 
-TEST(ServerSuite, IncorrectConnect) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, InvalidRequestArgs) {
+  auto client = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 222");
+  client.Write("connect 42 42");
 
-  Responses expected = {{0, "0"}, {1, "error"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  ASSERT_EQ(client.Read(), "error ConnectRequest: expect 1 args but got 2"s);
 }
 
-TEST(ServerSuite, InccorectOrderOfTurns) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, UnknownRequest) {
+  auto client = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 0");
-  server.MakeRequest(1, "turn 0 4 2");
+  client.Write("unknown");
 
-  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {1, "fail"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  ASSERT_EQ(client.Read(), "error Unknown request name: unknown"s);
 }
 
-TEST(ServerSuite, IncorrectTurn) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, ValidTurn) {
+  auto client1 = Client{};
+  auto client2 = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 0");
-  server.MakeRequest(0, "turn");
+  client1.Write("create");
+  auto game_id = client1.Read().substr(kCreatedLength);
 
-  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {0, "error"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  client2.Write(fmt::format("connect {}", game_id));
+  client2.Read();
+  client1.Read();
+  client1.Write(fmt::format("turn {} 4 2", game_id));
+
+  ASSERT_EQ(client1.Read(), "ok");
+  ASSERT_EQ(client2.Read(), "opponent 4 2");
+
+  client2.Write(fmt::format("turn {} 5 2", game_id));
+
+  ASSERT_EQ(client2.Read(), "ok");
+  ASSERT_EQ(client1.Read(), "opponent 5 2");
 }
 
-TEST(ServerSuite, IncorrectTurnWithoutGameId) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, InvalidTurnOutsideBoard) {
+  auto client1 = Client{};
+  auto client2 = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 0");
-  server.MakeRequest(0, "turn 4 2");
+  client1.Write("create");
+  auto res = client1.Read();
+  auto game_id = res.substr(kCreatedLength);
 
-  Responses expected = {{0, "0"}, {1, "connected"}, {0, "start"}, {0, "error"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  client2.Write(fmt::format("connect {}", game_id));
+  client2.Read();
+  client1.Read();
+  client1.Write(fmt::format("turn {} 100 200", game_id));
+
+  ASSERT_EQ(client1.Read(), "fail");
 }
 
-TEST(ServerSuite, CorrectTurn) {
-  auto server = ServerWrapper{};
+TEST_F(ServerSuite, InvalidTurnNotEmpty) {
+  auto client1 = Client{};
+  auto client2 = Client{};
 
-  server.MakeRequest(0, "create");
-  server.MakeRequest(1, "connect 0");
-  server.MakeRequest(0, "turn 0 4 2");
+  client1.Write("create");
+  auto res = client1.Read();
+  auto game_id = res.substr(kCreatedLength);
 
-  Responses expected = {
-      {0, "0"}, {1, "connected"}, {0, "start"}, {0, "ok"}, {1, "turn 4 2"}};
-  ASSERT_EQ(expected, server.GetResponses());
+  client2.Write(fmt::format("connect {}", game_id));
+  client2.Read();
+  client1.Read();
+
+  client1.Write(fmt::format("turn {} 3 3", game_id));
+  ASSERT_EQ(client1.Read(), "fail");
 }

@@ -11,7 +11,7 @@ set(REVERSI_SERVER reversi-server)
 set(REVERSI_SERVER_INCLUDE "${PROJECT_SOURCE_DIR}/include")
 
 add_subdirectory(bin)
-add_subdirectory(src)
+add_subdirectory(src/reversi/server)
 
 enable_testing()
 add_subdirectory(test)

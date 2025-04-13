@@ -1,6 +1,6 @@
 #include <thread>
 
-#include "app.h"
+#include "reversi/server/app.h"
 
 int main() {
   const auto port = 8080;
