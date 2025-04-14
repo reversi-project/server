@@ -81,7 +81,7 @@ TEST_F(ServerSuite, ValidConnectGame) {
 
   client2.Write(fmt::format("connect {}", game_id));
 
-  ASSERT_EQ(client2.Read(), "connected");
+  ASSERT_EQ(client2.Read(), "connected " + game_id);
   ASSERT_EQ(client1.Read(), "start");
 }
 

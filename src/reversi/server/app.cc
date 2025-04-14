@@ -103,6 +103,7 @@ void OnReadAsync(ConnectionPtr conn, FlatBufferPtr buf, BeastErrorCode ec) {
 
   auto data = buf->data();
   auto req = std::string{asio::buffers_begin(data), asio::buffers_end(data)};
+  std::cout << "[log] req is " << req << "\n";
 
   const auto actions = conn->handler->HandleRequest(&conn->ws, req);
   DoActions(conn, actions);
