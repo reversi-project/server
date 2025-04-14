@@ -84,12 +84,12 @@ class Handler {
     auto session_opt = server_.FindSessionByPlayerId(user_id);
     if (session_opt) {
       auto session = *session_opt;
-      const auto& white_player = session->GetWhitePlayer();
-      const auto& black_player = session->GetBlackPlayer();
-      if (white_player != user_id) {
+      auto white_player = session->GetWhitePlayer();
+      auto black_player = session->GetBlackPlayer();
+      if (white_player && white_player != user_id) {
         result.push_back({white_player, contract::QuitResponse{}});
       }
-      if (black_player != user_id) {
+      if (black_player && black_player != user_id) {
         result.push_back({black_player, contract::QuitResponse{}});
       }
       server_.DeleteSession(*session_opt);
