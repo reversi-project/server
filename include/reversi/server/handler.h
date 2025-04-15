@@ -46,7 +46,7 @@ class Handler {
           auto session_opt = server_.TryConnectToGame(user_id, req.game_id);
           if (session_opt) {
             auto opponent_id = (*session_opt)->GetOpponent(user_id);
-            return {{user_id, contract::ConnectedResponse{}},
+            return {{user_id, contract::ConnectedResponse{req.game_id}},
                     {opponent_id, contract::GameStartResponse{}}};
           }
           return {
